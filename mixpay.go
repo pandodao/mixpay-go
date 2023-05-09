@@ -132,9 +132,9 @@ func (c *Client) CreateOneTimePayment(ctx context.Context, req CreateOneTimePaym
 }
 
 type GetPaymentResultRequest struct {
-	TraceId string
-	OrderId string
-	PayeeId string
+	TraceId string `json:"traceId"`
+	OrderId string `json:"orderId"`
+	PayeeId string `json:"payeeId"`
 }
 
 type GetPaymentResultResponse struct {
