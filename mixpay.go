@@ -1,6 +1,7 @@
 package mixpay
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -9,6 +10,8 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+
+	"github.com/shopspring/decimal"
 )
 
 type Client struct {
@@ -23,7 +26,6 @@ func New() *Client {
 
 type Error struct {
 	Code    int    `json:"code"`
-	Success bool   `json:"success"`
 	Message string `json:"message"`
 
 	StatusCode int    `json:"-"`
@@ -32,6 +34,40 @@ type Error struct {
 
 func (e *Error) Error() string {
 	return fmt.Sprintf("statusCode: %d, raw: %s, code: %d, message: %s", e.StatusCode, e.Raw, e.Code, e.Message)
+}
+
+func parseResponse(r *http.Response, v interface{}) error {
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		return err
+	}
+
+	r.Body = io.NopCloser(bytes.NewReader(body))
+
+	var resp struct {
+		Error
+		Data        json.RawMessage `json:"data"`
+		TimestampMs int64           `json:"timestampMs"`
+		Success     bool            `json:"success"`
+	}
+
+	resp.StatusCode = r.StatusCode
+	if err := json.Unmarshal(body, &resp); err != nil {
+		resp.Success = false
+		resp.Code = r.StatusCode
+		resp.Message = http.StatusText(r.StatusCode)
+	}
+
+	if resp.Success {
+		if v != nil {
+			return json.Unmarshal(resp.Data, v)
+		}
+
+		return nil
+	}
+
+	resp.Raw = string(body)
+	return &resp.Error
 }
 
 type CreateOneTimePaymentRequest struct {
@@ -56,7 +92,8 @@ type CreateOneTimePaymentRequest struct {
 }
 
 type CreateOneTimePaymentResponse struct {
-	Code string `json:"code"`
+	Code    string `json:"code"`
+	CodeURL string `json:"codeUrl"`
 }
 
 func (r CreateOneTimePaymentResponse) PaymentLink() string {
@@ -111,24 +148,12 @@ func (c *Client) CreateOneTimePayment(ctx context.Context, req CreateOneTimePaym
 	}
 	defer resp.Body.Close()
 
-	var result struct {
-		Error
-		Data CreateOneTimePaymentResponse `json:"data"`
+	var result CreateOneTimePaymentResponse
+	if err := parseResponse(resp, &result); err != nil {
+		return nil, err
 	}
 
-	result.StatusCode = resp.StatusCode
-	data, _ := io.ReadAll(resp.Body)
-	result.Raw = string(data)
-
-	if err := json.Unmarshal(data, &result); err != nil {
-		return nil, &result.Error
-	}
-
-	if !result.Success {
-		return nil, &result.Error
-	}
-
-	return &result.Data, nil
+	return &result, nil
 }
 
 type GetPaymentResultRequest struct {
@@ -181,23 +206,70 @@ func (c *Client) GetPaymentResult(ctx context.Context, req GetPaymentResultReque
 	}
 	defer resp.Body.Close()
 
-	var result struct {
-		Error
-		Data GetPaymentResultResponse `json:"data"`
+	var result GetPaymentResultResponse
+	if err := parseResponse(resp, &result); err != nil {
+		return nil, err
 	}
 
-	result.StatusCode = resp.StatusCode
-	data, _ := io.ReadAll(resp.Body)
-	result.Raw = string(data)
+	raw, _ := io.ReadAll(resp.Body)
+	result.Raw = string(raw)
 
-	if err := json.Unmarshal(data, &result); err != nil {
-		return nil, &result.Error
+	return &result, nil
+}
+
+type Asset struct {
+	Name           string          `json:"name"`
+	Symbol         string          `json:"symbol"`
+	IconUrl        string          `json:"iconUrl"`
+	AssetId        string          `json:"assetId"`
+	IsAsset        bool            `json:"isAsset"`
+	Network        string          `json:"network"`
+	IsAvailable    bool            `json:"isAvailable"`
+	QuoteSymbol    string          `json:"quoteSymbol"`
+	MinQuoteAmount decimal.Decimal `json:"minQuoteAmount"`
+	MaxQuoteAmount decimal.Decimal `json:"maxQuoteAmount"`
+	ChainAsset     ChainAsset      `json:"chainAsset"`
+}
+
+type ChainAsset struct {
+	Id      string `json:"id"`
+	Name    string `json:"name"`
+	Symbol  string `json:"symbol"`
+	IconUrl string `json:"iconUrl"`
+}
+
+type ListSettlementAssetsRequest struct {
+	PayeeID string
+	// QuoteAssetID is assetId of quote cryptocurrency.
+	QuoteAssetID string
+	// QuoteAmount is the amount of quoteAssetId
+	QuoteAmount decimal.Decimal
+}
+
+func (c *Client) ListSettlementAssets(ctx context.Context, req *ListSettlementAssetsRequest) ([]*Asset, error) {
+	value := url.Values{}
+	if req != nil {
+		if req.PayeeID != "" {
+			value.Set("payeeId", req.PayeeID)
+		}
+
+		if req.QuoteAssetID != "" && req.QuoteAmount.IsPositive() {
+			value.Set("quoteAssetId", req.QuoteAssetID)
+			value.Set("quoteAmount", req.QuoteAmount.String())
+		}
 	}
 
-	if !result.Success {
-		return nil, &result.Error
+	r, _ := http.NewRequestWithContext(ctx, http.MethodGet, c.host+"/v1/setting/settlement_assets"+"?"+value.Encode(), nil)
+	resp, err := http.DefaultClient.Do(r)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	var assets []*Asset
+	if err := parseResponse(resp, &assets); err != nil {
+		return nil, err
 	}
 
-	result.Data.Raw = result.Raw
-	return &result.Data, nil
+	return assets, nil
 }
