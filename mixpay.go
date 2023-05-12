@@ -92,8 +92,7 @@ type CreateOneTimePaymentRequest struct {
 }
 
 type CreateOneTimePaymentResponse struct {
-	Code    string `json:"code"`
-	CodeURL string `json:"codeUrl"`
+	Code string `json:"code"`
 }
 
 func (r CreateOneTimePaymentResponse) PaymentLink() string {
